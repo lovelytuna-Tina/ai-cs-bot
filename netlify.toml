@@ -1,0 +1,6 @@
+﻿# Netlify 静态托管配置
+# 前端部署在 Netlify，后端 API 在 Render（https://ai-cs-bot.onrender.com）
+
+[build]
+  publish = "app/static"
+  command = ""
