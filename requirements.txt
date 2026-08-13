@@ -1,0 +1,10 @@
+# ===== Web 框架 =====
+fastapi>=0.115
+uvicorn>=0.30
+
+# ===== LLM 客户端（OpenAI 兼容接口，可对接 DeepSeek / 通义千问 / Moonshot 等）=====
+openai>=1.50
+
+# ===== 配置与数据校验 =====
+python-dotenv>=1.0
+pydantic>=2.9
