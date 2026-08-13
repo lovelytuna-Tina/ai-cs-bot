@@ -1,6 +1,12 @@
-﻿# Netlify 静态托管配置
+# Netlify 静态托管配置
 # 前端部署在 Netlify，后端 API 在 Render（https://ai-cs-bot.onrender.com）
 
 [build]
   publish = "app/static"
-  command = ""
+
+# API 请求代理到 Render 后端（避免跨域）
+[[redirects]]
+  from = "/api/*"
+  to = "https://ai-cs-bot.onrender.com/api/:splat"
+  status = 200
+  force = true

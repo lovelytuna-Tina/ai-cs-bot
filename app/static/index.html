@@ -1091,11 +1091,9 @@
 
 <script>
 // ========== Chat Logic (preserved & enhanced) ==========
-// 混合部署：Vercel 前端 → Render 后端 API
-const API_BASE = (location.hostname === '127.0.0.1' || location.hostname === 'localhost' || location.hostname.includes('onrender.com'))
-  ? ''  // 本地或 Render：同源请求
-  : 'https://ai-cs-bot.onrender.com';  // Vercel 等其他域名：跨域请求 Render
-const API = API_BASE + '/api/chat';
+// 部署模式：Netlify/Vercel/Render 均同源（Netlify 通过 _redirects 代理 /api/* 到 Render）
+const API_BASE = '';
+const API = '/api/chat';
 let sessionId = null;
 let sending = false;
 let adminMode = localStorage.getItem('adminMode') === 'true';
