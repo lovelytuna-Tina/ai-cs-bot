@@ -1168,7 +1168,7 @@ async function sendMessage() {
       const resp = await fetch(API, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, session_id: sessionId }),
+        body: JSON.stringify({ message: text, session_id: sessionId, cs_mode: adminMode }),
         signal: controller.signal
       });
       clearTimeout(timeoutId);

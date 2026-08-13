@@ -18,6 +18,7 @@ router = APIRouter(prefix="/api")
 class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None  # 不传则新建会话
+    cs_mode: bool = False  # 客服模式：True 时返回完整库存信息，False 时对用户隐藏库存数量
 
 
 class ToolCallInfo(BaseModel):
@@ -52,7 +53,7 @@ async def chat_endpoint(req: ChatRequest):
 
     # 2) Agent 主流程（检索知识库 -> 决策并执行工具 -> 生成回复）
     try:
-        result = agent.run(req.message, history=history)
+        result = agent.run(req.message, history=history, cs_mode=req.cs_mode)
     except Exception as e:
         return ChatResponse(
             reply=f"抱歉，服务暂时遇到问题，请稍后重试。\n（错误：{type(e).__name__}）",

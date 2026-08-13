@@ -178,19 +178,24 @@ def _format_tool_result_for_user(tc: dict[str, Any]) -> str:
         prods = data.get("products", [])
         lines = [f"🔍 找到 {data.get('count', len(prods))} 个相关商品："]
         for p in prods:
-            lines.append(f"  · {p['product_id']} {p['name']}（{p['category']}）￥{p['price']} 库存{p['stock']}")
+            stock_info = f"库存{p['stock']}" if "stock" in p else p.get("stock_status", "")
+            lines.append(f"  · {p['product_id']} {p['name']}（{p['category']}）￥{p['price']} {stock_info}")
         return "\n".join(lines)
     if tool == "get_product_detail":
+        stock_info = f"库存：{data.get('stock', '—')}" if "stock" in data else f"库存：{data.get('stock_status', '—')}"
         return (
             f"📦 商品详情：\n"
             f"  名称：{data['name']}\n"
             f"  价格：￥{data['price']}\n"
             f"  规格：{data.get('specs', '—')}\n"
-            f"  库存：{data.get('stock', '—')}\n"
+            f"  {stock_info}\n"
             f"  描述：{data.get('description', '—')}"
         )
     if tool == "check_stock":
-        return f"📦 {data['name']} 库存：{data['stock']} 件（{data['status']}）"
+        if "stock" in data:
+            return f"📦 {data['name']} 库存：{data['stock']} 件（{data['status']}）"
+        else:
+            return f"📦 {data['name']} 状态：{data['status']}"
     if tool == "place_order":
         return (
             f"✅ 下单成功：\n"
@@ -228,8 +233,11 @@ def _format_tool_results_for_llm(tool_calls: list[dict[str, Any]]) -> str:
 # ------------------------------------------------------------------
 # 对外入口
 # ------------------------------------------------------------------
-def run(message: str, history: list[dict] | None = None) -> dict[str, Any]:
+def run(message: str, history: list[dict] | None = None, cs_mode: bool = False) -> dict[str, Any]:
     """Agent 主流程：转接检测 -> 检索 -> 决策工具 -> 执行 -> 生成回复。
+
+    参数:
+        cs_mode: 客服模式。True 时返回完整库存信息，False 时对普通用户隐藏库存数量。
 
     返回: {"reply": str, "rag_hits": list, "tool_calls": list, "handoff": dict}
     """
@@ -268,17 +276,47 @@ def run(message: str, history: list[dict] | None = None) -> dict[str, Any]:
 
     # 4) 生成回复
     if llm.IS_MOCK:
-        reply = _mock_reply(message, history, context, executed)
+        reply = _mock_reply(message, history, context, executed, cs_mode)
     else:
         # 真实模式：把 RAG 背景 + 工具结果一起喂给大模型润色
         extra = ""
         if context:
             extra += context
         if executed:
-            extra += "\n" + _format_tool_results_for_llm(executed)
+            # 非客服模式下，过滤工具结果中的库存数量
+            filtered_executed = executed if cs_mode else _strip_stock_from_tool_calls(executed)
+            extra += "\n" + _format_tool_results_for_llm(filtered_executed)
+            if not cs_mode:
+                extra += "\n【重要规则】当前为普通用户模式，回复中不要提及具体库存数量，只需说「有货」或「缺货」即可。"
         reply = llm.chat(message, history=history, context=extra or None)
 
     return {"reply": reply, "rag_hits": hits, "rag_mode": rag.kb.mode, "tool_calls": executed, "handoff": hf}
+
+
+def _strip_stock_from_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """非客服模式下，从工具结果中移除具体库存数量，只保留有货/缺货状态。"""
+    import copy
+    filtered = copy.deepcopy(tool_calls)
+    for tc in filtered:
+        res = tc.get("result", {})
+        if not res.get("success"):
+            continue
+        data = res.get("data", {})
+        tool = tc["tool"]
+        # search_products: data.products 列表中每个商品移除 stock
+        if tool == "search_products" and "products" in data:
+            for p in data["products"]:
+                stock = p.pop("stock", None)
+                p["stock_status"] = "有货" if stock and stock > 0 else "缺货"
+        # get_product_detail: 移除 stock，添加 stock_status
+        elif tool == "get_product_detail" and "stock" in data:
+            stock = data.pop("stock")
+            data["stock_status"] = "有货" if stock > 0 else "缺货"
+        # check_stock: 移除 stock 数字，保留 status
+        elif tool == "check_stock" and "stock" in data:
+            data.pop("stock")
+            # available 和 status 字段已足够表达有货/缺货
+    return filtered
 
 
 def _mock_reply(
@@ -286,11 +324,14 @@ def _mock_reply(
     history: list[dict] | None,
     context: str | None,
     tool_calls: list[dict[str, Any]],
+    cs_mode: bool = False,
 ) -> str:
     """模拟模式下的回复：有工具结果就展示结果，否则走普通 mock chat。"""
     if tool_calls:
+        # 非客服模式下过滤库存数量
+        display_calls = tool_calls if cs_mode else _strip_stock_from_tool_calls(tool_calls)
         parts = ["【模拟模式·已执行业务工具】以下为工具返回结果（接入真实大模型后会用自然语言润色）："]
-        for tc in tool_calls:
+        for tc in display_calls:
             parts.append(_format_tool_result_for_user(tc))
         return "\n\n".join(parts)
     # 没有工具调用，走普通对话（含 RAG 提示）
