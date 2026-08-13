@@ -1,0 +1,6 @@
+﻿{
+  "buildCommand": null,
+  "outputDirectory": "app/static",
+  "cleanUrls": true,
+  "trailingSlash": false
+}
