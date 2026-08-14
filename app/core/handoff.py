@@ -17,7 +17,20 @@ from app.config import HANDOFF_KEYWORDS
 _NEGATIVE_WORDS = [
     "气死", "骗子", "垃圾", "恶心", "无语", "失望", "坑人",
     "差评", "投诉", "骗", "退款没用", "烦死",
+    "没人理", "什么态度", "到底", "怎么还不", "等了好久",
+    "解决不了", "没用", "急死", "受不了", "再也不",
 ]
+
+
+def _is_similar(text1: str, text2: str) -> bool:
+    """判断两段文本是否相似（字符二元组Jaccard相似度>0.5）。"""
+    if not text1 or not text2 or len(text1) < 2 or len(text2) < 2:
+        return False
+    s1 = {text1[i:i+2] for i in range(len(text1) - 1)}
+    s2 = {text2[i:i+2] for i in range(len(text2) - 1)}
+    if not s1 or not s2:
+        return False
+    return len(s1 & s2) / len(s1 | s2) > 0.5
 
 
 def detect(message: str, history: list[dict] | None = None) -> dict:
@@ -43,9 +56,26 @@ def detect(message: str, history: list[dict] | None = None) -> dict:
     if excl >= 3:
         reasons.append(f"感叹号密集（{excl} 个），情绪较激动")
 
-    # 4) 多轮未解决（历史超过 6 轮 = 12 条消息）
-    if len(history) >= 12:
+    # 4) 多轮未解决（历史超过 4 轮 = 8 条消息，从6轮降低到4轮）
+    if len(history) >= 8:
         reasons.append("对话轮次较多，疑似问题未解决")
+
+    # 5) 重复提问检测（用户连续2次问相似问题，说明AI没解决）
+    user_msgs = [m.get("content", "") for m in history if m.get("role") == "user"]
+    user_msgs.append(message)
+    if len(user_msgs) >= 3:
+        # 检查最近2次用户消息是否与当前相似
+        for prev in user_msgs[-3:-1]:
+            if _is_similar(prev, message):
+                reasons.append("用户重复提问，疑似问题未解决")
+                break
+
+    # 6) 困惑检测（连续2条消息都包含多个问号）
+    qmark = message.count("?") + message.count("？")
+    if qmark >= 2 and len(user_msgs) >= 2:
+        prev_qmark = user_msgs[-2].count("?") + user_msgs[-2].count("？") if len(user_msgs) >= 2 else 0
+        if prev_qmark >= 2:
+            reasons.append("用户连续多次提问，疑似困惑")
 
     should = len(reasons) > 0
     # 紧急程度：有负面情绪或感叹号密集为"高"，仅显式请求为"中"

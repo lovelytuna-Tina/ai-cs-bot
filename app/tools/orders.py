@@ -92,7 +92,7 @@ def place_order(product_id: str, quantity: int = 1, address: str = "") -> dict[s
     if product["stock"] < qty:
         return {
             "success": False,
-            "message": f"库存不足：{product['name']} 当前库存 {product['stock']} 件，无法下单 {qty} 件。",
+            "message": f"库存不足：{product['name']} 当前可售数量不足以完成 {qty} 件下单，请减少数量或更换商品。",
         }
 
     order_id = f"2025081{int(time.time()) % 100000:05d}"

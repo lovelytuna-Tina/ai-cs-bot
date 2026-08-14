@@ -5,7 +5,7 @@ LLM 客户端封装
 未配置 API Key 时自动进入"模拟模式"，返回提示文案，方便无 Key 时也能跑通流程。
 """
 from openai import OpenAI
-from app.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, SYSTEM_PROMPT, EMBEDDING_MODEL
+from app.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, SYSTEM_PROMPT, EMBEDDING_MODEL, LLM_VISION_MODEL
 
 # LLM 请求超时（秒）
 LLM_TIMEOUT = 30
@@ -69,6 +69,58 @@ def chat(
         # LLM 调用失败（超时/网络错误/限流），返回友好提示而非崩溃
         return f"抱歉，AI 服务暂时不可用，请稍后重试。\n（错误信息：{type(e).__name__}）"
 
+
+
+
+def chat_with_vision(
+    user_message: str,
+    images: list[str],
+    history: list[dict] | None = None,
+    context: str | None = None,
+) -> str:
+    """多模态对话：把图片和文字一起发给视觉模型分析。
+
+    参数:
+        user_message: 用户文字描述
+        images: base64编码的图片列表（不含data:前缀）
+        history: 对话历史
+        context: RAG背景知识
+    返回:
+        视觉模型对图片的分析结果（文本）
+    """
+    if IS_MOCK:
+        return f"[模拟模式] 收到 {len(images)} 张图片，但未配置API Key，无法进行视觉分析。用户描述：{user_message}"
+
+    # 构建多模态消息内容
+    content: list[dict] = []
+    if user_message:
+        content.append({"type": "text", "text": user_message})
+    for img_b64 in images:
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}
+        })
+
+    # 添加分析指令
+    content.append({
+        "type": "text",
+        "text": "\n\n请作为电商客服视觉助手分析以上图片。重点关注：1)商品类型和外观 2)是否有破损/污渍/变形 3)商品与包装是否匹配 4)其他可见问题。用简洁中文描述分析结果。"
+    })
+
+    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if context:
+        messages.append({"role": "system", "content": context})
+    messages.append({"role": "user", "content": content})
+
+    try:
+        response = _client.chat.completions.create(
+            model=LLM_VISION_MODEL,
+            messages=messages,
+            temperature=0.3,  # 视觉分析需要较低温度，保证稳定
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"视觉分析暂时不可用：{type(e).__name__}。请尝试用文字描述问题。"
 
 def embed_texts(texts: list[str], chunk_size: int = 10) -> list[list[float]] | None:
     """调用嵌入模型，把文本转向量。

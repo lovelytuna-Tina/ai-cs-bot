@@ -15,6 +15,7 @@ import re
 from typing import Any
 
 from app.core import llm, rag, handoff
+from app.core.llm import chat_with_vision
 from app.tools import TOOL_FUNCTIONS, TOOL_DEFINITIONS
 
 # 订单号识别：8 位以上数字，或"订单号/单号/订单"后跟的数字
@@ -137,10 +138,62 @@ def _llm_decide(message: str, history: list[dict] | None) -> list[dict[str, Any]
 # ------------------------------------------------------------------
 # 回复生成
 # ------------------------------------------------------------------
+def _stock_availability_label(stock: int | float | None) -> str:
+    """把精确库存换成顾客可见的状态文案。"""
+    try:
+        n = int(stock) if stock is not None else 0
+    except (TypeError, ValueError):
+        return "现货情况请以页面为准"
+    if n <= 0:
+        return "暂时缺货"
+    if n <= 50:
+        return "库存紧张"
+    return "现货充足"
+
+
+def _sanitize_tool_result_for_customer(result: dict[str, Any]) -> dict[str, Any]:
+    """隐藏精确库存件数，仅保留有货状态（给顾客回复 / 喂给 LLM 用）。
+
+    原始 tool_calls 仍原样返回前端，供「客服模式」查看精确数量。
+    """
+    import copy
+
+    r = copy.deepcopy(result)
+    if not r.get("success"):
+        msg = str(r.get("message", ""))
+        if "库存" in msg:
+            msg = re.sub(r"当前库存\s*\d+\s*件", "当前库存不足", msg)
+            msg = re.sub(r"库存\s*\d+\s*件?", "库存不足", msg)
+            r["message"] = msg
+        return r
+
+    data = r.get("data")
+    if not isinstance(data, dict):
+        return r
+
+    products = data.get("products")
+    if isinstance(products, list):
+        for p in products:
+            if isinstance(p, dict) and "stock" in p:
+                stock = p.pop("stock")
+                p["availability"] = _stock_availability_label(stock)
+
+    if "stock" in data:
+        stock = data.pop("stock")
+        data["availability"] = data.get("status") or _stock_availability_label(stock)
+        if "available" not in data:
+            try:
+                data["available"] = int(stock) > 0
+            except (TypeError, ValueError):
+                data["available"] = False
+
+    return r
+
+
 def _format_tool_result_for_user(tc: dict[str, Any]) -> str:
     """把单个工具的执行结果格式化成给用户看的文字（模拟模式用）。"""
     tool = tc["tool"]
-    res = tc["result"]
+    res = _sanitize_tool_result_for_customer(tc["result"])
     if not res.get("success"):
         return f"⚠️ {res.get('message', '操作失败')}"
 
@@ -224,28 +277,42 @@ def _format_tool_result_for_user(tc: dict[str, Any]) -> str:
 
 def _format_tool_results_for_llm(tool_calls: list[dict[str, Any]]) -> str:
     """把工具结果整理成大模型可读的背景信息（真实模式用）。"""
-    lines = ["以下是已执行的业务工具及其返回结果，请据此回答用户："]
+    lines = [
+        "以下是已执行的业务工具及其返回结果，请据此回答用户。",
+        "注意：结果中已隐藏精确库存件数；对顾客只说「现货充足/有货/库存紧张/暂时缺货」，不要编造或还原具体数字。",
+    ]
     for tc in tool_calls:
-        lines.append(f"- 工具 {tc['tool']}（参数 {tc['args']}）返回：{tc['result']}")
+        safe = _sanitize_tool_result_for_customer(tc["result"])
+        lines.append(f"- 工具 {tc['tool']}（参数 {tc['args']}）返回：{safe}")
     return "\n".join(lines)
 
 
 # ------------------------------------------------------------------
 # 对外入口
 # ------------------------------------------------------------------
-def run(message: str, history: list[dict] | None = None, cs_mode: bool = False) -> dict[str, Any]:
+def run(message: str, history: list[dict] | None = None, cs_mode: bool = False, images: list[str] | None = None) -> dict[str, Any]:
     """Agent 主流程：转接检测 -> 检索 -> 决策工具 -> 执行 -> 生成回复。
 
     参数:
         cs_mode: 客服模式。True 时返回完整库存信息，False 时对普通用户隐藏库存数量。
+        images: base64 编码的图片列表，用于多模态视觉分析。
 
     返回: {"reply": str, "rag_hits": list, "tool_calls": list, "handoff": dict}
     """
     # 0) 人工转接检测（优先级最高：该转接就直接转，不再执行业务工具）
     hf = handoff.detect(message, history)
 
+    # 0.5) 多模态：如果有图片，先用视觉模型分析
+    vision_analysis = ""
+    if images:
+        vision_analysis = chat_with_vision(message, images, history=history)
+
     # 1) RAG 检索知识库（转接场景下也检索，便于人工客服参考）
     context, hits = rag.build_rag_context(message)
+
+    # 1.5) 把视觉分析结果注入context，让主LLM调用能看到图片内容
+    if vision_analysis:
+        context = (context + "\n\n" if context else "") + f"[图片分析结果] {vision_analysis}"
 
     if hf["should_handoff"]:
         return {
@@ -254,6 +321,7 @@ def run(message: str, history: list[dict] | None = None, cs_mode: bool = False) 
             "rag_mode": rag.kb.mode,
             "tool_calls": [],
             "handoff": hf,
+            "vision_analysis": vision_analysis,
         }
 
     # 2) 决策需要哪些工具
@@ -290,7 +358,7 @@ def run(message: str, history: list[dict] | None = None, cs_mode: bool = False) 
                 extra += "\n【重要规则】当前为普通用户模式，回复中不要提及具体库存数量，只需说「有货」或「缺货」即可。"
         reply = llm.chat(message, history=history, context=extra or None)
 
-    return {"reply": reply, "rag_hits": hits, "rag_mode": rag.kb.mode, "tool_calls": executed, "handoff": hf}
+    return {"reply": reply, "rag_hits": hits, "rag_mode": rag.kb.mode, "tool_calls": executed, "handoff": hf, "vision_analysis": vision_analysis}
 
 
 def _strip_stock_from_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:

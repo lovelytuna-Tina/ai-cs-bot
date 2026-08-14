@@ -16,9 +16,22 @@
 import json
 import math
 import os
+import re
 from collections import Counter
 
 from app.core import llm
+
+# ========== 匹配质量优化参数 ==========
+MIN_SCORE_THRESHOLD = 0.55  # 低于此分数视为未命中（不返回FAQ）
+_PLACEHOLDER_RE = re.compile(r"\[.*?\]")
+
+
+def _clean_placeholders(text: str) -> str:
+    """清理占位符 [数字x] [金额x] 等，避免占位符污染匹配。"""
+    cleaned = _PLACEHOLDER_RE.sub("", text).strip()
+    # 合并多余空格
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned if cleaned else text  # 如果清理后为空，保留原文
 
 _FAQ_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "faq.json")
 
@@ -66,7 +79,7 @@ class KnowledgeBase:
         df: Counter = Counter()
         tokenized: list[list[str]] = []
         for doc in self.docs:
-            tokens = _char_bigrams(doc["question"] + doc["answer"])
+            tokens = _char_bigrams(_clean_placeholders(doc["question"] + doc["answer"]))
             tokenized.append(tokens)
             for t in set(tokens):
                 df[t] += 1
@@ -86,7 +99,10 @@ class KnowledgeBase:
     # ---------- 向量索引 ----------
     def _build_vector_index(self) -> None:
         """启动时批量把所有 FAQ 转向量并缓存。失败则降级为 TF-IDF。"""
-        texts = [f"{d['question']} {d['answer']} {' '.join(d.get('keywords', []))}" for d in self.docs]
+        texts = [
+            f"{_clean_placeholders(d['question'])} {_clean_placeholders(d['answer'])} {' '.join(d.get('keywords', []))}"
+            for d in self.docs
+        ]
         embs = llm.embed_texts(texts)
         if embs and len(embs) == len(self.docs):
             self.doc_embeddings = embs
@@ -105,30 +121,41 @@ class KnowledgeBase:
 
     # ---------- 检索 ----------
     def retrieve(self, query: str, top_k: int = 3) -> list[dict]:
-        """检索与 query 最相关的 top_k 条 FAQ。"""
-        kw_scores = [sum(1 for kw in d.get("keywords", []) if kw in query) for d in self.docs]
+        """检索与 query 最相关的 top_k 条 FAQ。
+
+        优化点：
+        - 清理查询中的占位符，避免占位符污染
+        - 关键词分数归一化到 0-1
+        - 加权评分：85% 向量 + 15% 关键词
+        - 低于 MIN_SCORE_THRESHOLD 的结果不返回
+        """
+        clean_q = _clean_placeholders(query)
+        kw_scores = [sum(1 for kw in d.get("keywords", []) if kw in clean_q) for d in self.docs]
+        max_kw = max(kw_scores) if kw_scores else 0
         # 向量模式下尝试查询向量；拿不到则本轮降级 TF-IDF
-        qv = self._embed_query(query) if self.use_vectors else None
+        qv = self._embed_query(clean_q) if self.use_vectors else None
         use_vec = self.use_vectors and qv is not None
 
         scores: list[tuple[float, int]] = []
         for i, _doc in enumerate(self.docs):
             kw = kw_scores[i]
+            kw_norm = (kw / max_kw) if max_kw > 0 else 0.0
             if use_vec:
                 sim = _cosine(qv, self.doc_embeddings[i], self.doc_norms[i])
-                final = sim + kw * 0.1  # 向量为主，关键词小幅加权
+                final = sim * 0.85 + kw_norm * 0.15
             else:
-                tfv = self._tfidf_query_vec(query)
+                tfv = self._tfidf_query_vec(clean_q)
                 dv = self.doc_vectors[i]
                 tfidf = sum(w * dv.get(k, 0.0) for k, w in tfv.items())
-                final = kw + tfidf  # 关键词为主，TF-IDF 辅助
+                tfidf_norm = min(tfidf / (tfidf + 1.0), 1.0)  # 归一化到 0-1
+                final = kw_norm * 0.5 + tfidf_norm * 0.5
             scores.append((final, i))
 
         scores.sort(reverse=True)
         results = []
         for score, i in scores[:top_k]:
-            if score <= 0:
-                break
+            if score < MIN_SCORE_THRESHOLD:
+                break  # 低于门槛，不再返回
             doc = self.docs[i]
             results.append(
                 {
