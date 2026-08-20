@@ -11,7 +11,7 @@
 | 访问方式 | 链接 | 适用场景 |
 |---|---|---|
 | 国内服务器（推荐） | http://1.12.55.192:8000 | 国内用户访问，速度快、稳定 |
-| 海外托管 | https://loquacious-malabi-1b6e2c.netlify.app | 海外用户访问，Netlify 静态托管 |
+| 海外托管 | https://ai-kefu-bot.netlify.app | 海外用户访问，Netlify 静态托管 |
 
 体验指南：
 - 直接在聊天框输入问题即可，例如「推荐一款耳机」「订单 20250812001 到哪了」「蓝牙耳机还有货吗」
@@ -369,6 +369,74 @@ Content-Type: application/json
 |---|---|
 | 60 秒超时 | `AbortController` 控制 fetch，超时自动中断 |
 | 自动重试 | 超时后重试 1 次，重试时显示"正在重试..."提示 |
+
+---
+
+## 部署到 Vercel
+
+项目已内置 Vercel 部署配置，一键部署，无需服务器。
+
+### 部署文件说明
+
+| 文件 | 作用 |
+|---|---|
+| `api/index.py` | Vercel Serverless Function 入口（FastAPI + Mangum） |
+| `vercel.json` | Vercel 配置（路由重写、静态文件、超时设置） |
+| `requirements.txt` | Python 依赖（含 mangum） |
+
+### 部署步骤
+
+**方式一：Vercel CLI（推荐）**
+
+```bash
+# 1. 安装 Vercel CLI
+npm i -g vercel
+
+# 2. 在项目根目录执行
+vercel
+
+# 3. 设置环境变量（在 Vercel 项目设置 → Environment Variables）
+#    LLM_API_KEY=sk-你的密钥
+#    LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+#    LLM_MODEL=qwen-turbo
+#    RAG_MODE=tfidf
+```
+
+**方式二：Git 集成**
+
+1. 将代码推送到 GitHub 仓库
+2. 在 Vercel 控制台点击 "Add New → Project"
+3. 导入你的仓库，Vercel 会自动识别 Python 项目
+4. 在 Environment Variables 中添加 `LLM_API_KEY` 等配置
+5. 点击 Deploy
+
+### Vercel 环境变量配置
+
+| 变量名 | 示例值 | 必填 | 说明 |
+|---|---|---|---|
+| `LLM_API_KEY` | `sk-xxx` | ✅ | 大模型 API 密钥 |
+| `LLM_BASE_URL` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | ✅ | API 地址 |
+| `LLM_MODEL` | `qwen-turbo` | ✅ | 模型名称 |
+| `RAG_MODE` | `tfidf` | ❌ | 知识库检索模式，默认 tfidf（Vercel 推荐） |
+
+### 注意事项
+
+- **RAG 模式**：Vercel 无服务器环境下推荐 `tfidf` 模式，冷启动更快、体积更小。向量模式需要每次冷启动都计算 87 条 FAQ 的向量，会增加首延迟。
+- **冷启动**：Vercel Serverless Function 有冷启动延迟（约 2-5 秒），首次请求会慢一些，后续请求很快。
+- **无状态**：Vercel 函数是无状态的，多轮记忆只在同一次请求内有效。如需持久化记忆，需接入 Redis 或数据库。
+- **超时**：默认超时 30 秒，LLM 调用一般 5-10 秒，足够使用。
+
+### 部署后验证
+
+```bash
+# 健康检查
+curl https://你的项目名.vercel.app/api/health
+
+# 聊天测试
+curl -X POST https://你的项目名.vercel.app/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "你好"}'
+```
 
 ---
 
